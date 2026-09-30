@@ -69,10 +69,10 @@ export const getDataDirQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
-export const getSshHostsQuery = () => queryOptions({
-  queryKey: workspaceKey("getSshHosts"),
-  queryFn: ({ signal }) => api.getSshHosts(signal),
-  staleTime: 300_000,
+export const getSshSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getSshSettings"),
+  queryFn: ({ signal }) => api.getSshSettings(signal),
+  staleTime: 30_000,
 });
 
 export const getSshConfigQuery = () => queryOptions({
@@ -135,33 +135,48 @@ export const getTelemetryQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getHarnessSetupCommandsQuery = () => queryOptions({
+  queryKey: workspaceKey("getHarnessSetupCommands"),
+  queryFn: ({ signal }) => api.getHarnessSetupCommands(signal),
+  staleTime: Infinity,
+});
+
 export const getHarnessesQuery = () => queryOptions({
   queryKey: workspaceKey("getHarnesses"),
   queryFn: ({ signal }) => api.getHarnesses(false, false, signal),
   staleTime: 300_000,
+  // Poll while anything is unresolved: `harness.catalog` is edge-triggered, so
+  // a fill that lands before the EventSource connects would otherwise strand a
+  // provisional payload until the 5-minute staleTime expires.
+  refetchInterval: (query) => query.state.data?.some((h) => h.accountLoading || h.catalogPending) ? 1_000 : false,
 });
 
-export const getSkillsQuery = () => queryOptions({
-  queryKey: workspaceKey("getSkills"),
-  queryFn: ({ signal }) => api.getSkills(signal),
+export const getSkillsQuery = (harness?: string, projectId?: string) => queryOptions({
+  queryKey: workspaceKey("getSkills", harness ?? null, projectId ?? null),
+  queryFn: ({ signal }) => api.getSkills(signal, harness, projectId),
+  select: (data) => data.skills,
+  refetchInterval: (query) => query.state.data?.importing ? 2_000 : 30_000,
   staleTime: 300_000,
 });
 
-export const getSkillContentQuery = (name: string, projectId?: string) => queryOptions({
-  queryKey: workspaceKey("getSkillContent", name, projectId ?? null),
-  queryFn: ({ signal }) => api.getSkillContent(name, projectId, signal),
+export const getSkillContentQuery = (name: string, projectId?: string, harness?: string | null) => queryOptions({
+  queryKey: workspaceKey("getSkillContent", name, projectId ?? null, harness ?? null),
+  queryFn: ({ signal }) => api.getSkillContent(name, projectId, signal, harness),
   staleTime: 300_000,
 });
 
 export const listLatexTemplatesQuery = () => queryOptions({
   queryKey: workspaceKey("listLatexTemplates"),
   queryFn: ({ signal }) => api.listLatexTemplates(signal),
+  refetchInterval: 30_000,
   staleTime: 300_000,
 });
 
 export const listUserSkillsQuery = () => queryOptions({
   queryKey: workspaceKey("listUserSkills"),
   queryFn: ({ signal }) => api.listUserSkills(signal),
+  select: (data) => data.skills,
+  refetchInterval: (query) => query.state.data?.importing ? 2_000 : 30_000,
   staleTime: 300_000,
 });
 
@@ -173,3 +188,9 @@ export async function refreshHarnesses(refresh = false, retryRejected = false) {
   if (isCurrentScope(options.queryKey)) queryClient.setQueryData(options.queryKey, data);
   return data;
 }
+
+export const getLocalModelsQuery = () => queryOptions({
+  queryKey: workspaceKey("getLocalModels"),
+  queryFn: ({ signal }) => api.getLocalModels(signal),
+  staleTime: 30_000,
+});

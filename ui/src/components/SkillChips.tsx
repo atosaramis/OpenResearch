@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Copy, Cpu, Download, FoldVertical, Goal, History, ListChecks, SquarePen, WandSparkles, type LucideIcon } from "lucide-react";
 
 import { getSkillContentQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
@@ -15,7 +16,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { type SkillInfo } from "../api";
-import { splitCommandTokens } from "../planCommand";
+import { canonicalSkillName, commandDisplayName, isComposerCommand, splitCommandTokens, type ComposerCommandName } from "../composerCommands";
 import { Md } from "./Md";
 import { Badge } from "./ui";
 
@@ -44,6 +45,45 @@ const MIRRORED_PROPERTIES = [
   "border-left-width",
 ];
 
+let skillMeasurement: CanvasRenderingContext2D | null = null;
+
+export function skillMarginSpaces(name: string, textarea: HTMLTextAreaElement | null): number {
+  const measurement = skillMeasurement ??= document.createElement("canvas").getContext("2d");
+  if (!measurement || !textarea) return 6;
+  const style = getComputedStyle(textarea);
+  measurement.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  // Match SkillLabel's 16px icon and 4px gap, plus 6px before adjacent text.
+  const extraWidth = 16 + 4 + measurement.measureText(commandDisplayName(name)).width
+    - measurement.measureText(`/${name}`).width;
+  return Math.max(1, Math.ceil((extraWidth + 6) / measurement.measureText(" ").width));
+}
+
+const COMMAND_ICONS: Record<ComposerCommandName, LucideIcon> = {
+  plan: ListChecks,
+  goal: Goal,
+  new: SquarePen,
+  resume: History,
+  model: Cpu,
+  compact: FoldVertical,
+  copy: Copy,
+  export: Download,
+};
+
+/** Skills never share a command's name (see `commandsForHarness`), so the name alone picks the icon. */
+export function CommandIcon({ name, className }: { name: string; className?: string }) {
+  const Icon = isComposerCommand(name) ? COMMAND_ICONS[name] : WandSparkles;
+  return <Icon size={16} strokeWidth={1.5} className={className} aria-hidden="true" />;
+}
+
+function SkillLabel({ name }: { name: string }) {
+  return (
+    <>
+      <CommandIcon name={name} className="me-1 inline-block align-middle" />
+      {commandDisplayName(name)}
+    </>
+  );
+}
+
 function chipSegments(
   text: string,
   isCommand: (name: string) => boolean,
@@ -61,12 +101,17 @@ function chipSegments(
   wrapPlainText = false,
 ): ReactNode[] {
   let offset = 0;
-  return splitCommandTokens(text, isCommand).map((segment, i) => {
+  return splitCommandTokens(text, isCommand).map((segment, i, segments) => {
     const end = offset + segment.text.length;
     offset = end;
     const name = segment.text.slice(1).toLowerCase();
     if (segment.command && renderCommand) {
       return renderCommand(segment.text, name, end, i);
+    }
+    let plainText = segment.text;
+    if (!wrapPlainText) {
+      if (segments[i - 1]?.command) plainText = plainText.replace(/^[ \t]+/, " ");
+      if (segments[i + 1]?.command) plainText = plainText.replace(/[ \t]+$/, " ");
     }
     return segment.command ? (
       <span
@@ -76,14 +121,13 @@ function chipSegments(
           onCommandMouseDown ? (event) => onCommandMouseDown(event, end) : undefined
         }
       >
-        <span className="text-skill-blue-slash">/</span>
-        {segment.text.slice(1)}
+        <SkillLabel name={name} />
       </span>
     ) : (
       wrapPlainText ? (
         <span key={i} aria-hidden="true">{segment.text}</span>
       ) : (
-        <Fragment key={i}>{segment.text}</Fragment>
+        <Fragment key={i}>{plainText}</Fragment>
       )
     );
   });
@@ -109,7 +153,7 @@ function ComposerSkillToken({
   const closeTimer = useRef<number | null>(null);
   const cardId = useId();
   const [open, setOpen] = useState(false);
-  const preview = useQuery({ ...getSkillContentQuery(name, projectId), enabled: open, subscribed: open });
+  const preview = useQuery({ ...getSkillContentQuery(name, projectId, skill.harness), enabled: open, subscribed: open });
   const content = preview.data ?? null;
   const loading = preview.isFetching;
   const [position, setPosition] = useState<CSSProperties>({});
@@ -162,7 +206,7 @@ function ComposerSkillToken({
         aria-controls={cardId}
         aria-expanded={open}
         aria-label={m.a11y_preview_skill({ name })}
-        className="composer-chip group/skill pointer-events-auto relative z-1 cursor-text rounded-md bg-background text-skill-blue"
+        className="composer-chip group/skill pointer-events-auto relative z-1 inline-grid align-baseline cursor-text rounded-md bg-background text-skill-blue"
         onMouseEnter={show}
         onMouseLeave={scheduleClose}
         onFocus={show}
@@ -199,10 +243,15 @@ function ComposerSkillToken({
           clearClose();
         }}
       >
-        <span className="pointer-events-none absolute -inset-[7px] z-0 rounded-md bg-skill-blue-subtle opacity-0 transition-opacity group-hover/skill:opacity-100" />
-        <span className="relative z-1">
-          <span className="text-skill-blue-slash">/</span>
-          {label.slice(1)}
+        {/* Keep the native token's width; the label uses the spacing reserved on selection. */}
+        <span className="invisible col-start-1 row-start-1" aria-hidden="true">{label}</span>
+        <span className="relative z-1 col-start-1 row-start-1 w-0 whitespace-nowrap">
+          <span className="relative inline-block">
+            <span className="pointer-events-none absolute -inset-[7px] rounded-md bg-skill-blue-subtle opacity-0 transition-opacity group-hover/skill:opacity-100" />
+            <span className="relative text-skill-blue">
+              <SkillLabel name={name} />
+            </span>
+          </span>
         </span>
       </span>
       {open &&
@@ -224,7 +273,7 @@ function ComposerSkillToken({
             onMouseDown={(event) => event.stopPropagation()}
           >
             <div className="sticky top-0 z-1 flex items-center gap-2 border-b border-border-variant bg-background px-4 py-3">
-              <span className="text-sm font-medium text-muted">/{name}</span>
+              <span className="text-sm font-medium text-muted">{commandDisplayName(name)}</span>
               <Badge className="h-5 border-border-variant bg-canvas px-1.5 tracking-[0.05em]">
                 {m.skill_chips_badge()}
               </Badge>
@@ -256,7 +305,7 @@ export function MessageWithChips({
       {chipSegments(
         text,
         isCommand,
-        "skill-chip mx-1 inline-flex items-center rounded-md px-2 py-1 font-medium text-skill-blue transition-colors hover:bg-skill-blue-subtle",
+        "skill-chip me-0.5 whitespace-nowrap font-normal text-skill-blue",
       )}
     </>
   );
@@ -270,6 +319,7 @@ export function MessageWithChips({
  * native input. */
 export function ComposerSkillChips({
   text,
+  editingTokenEnd,
   isCommand,
   skills,
   projectId,
@@ -277,6 +327,7 @@ export function ComposerSkillChips({
 }: {
   /** The textarea's exact current value — chips land by character offset. */
   text: string;
+  editingTokenEnd?: number;
   isCommand: (name: string) => boolean;
   skills: SkillInfo[];
   projectId: string;
@@ -333,7 +384,10 @@ export function ComposerSkillChips({
         "",
         undefined,
         (label, name, end, key) => {
-          const skill = skills.find((candidate) => candidate.name === name);
+          if (end === editingTokenEnd) {
+            return <span key={`${key}:${end}`} aria-hidden="true">{label}</span>;
+          }
+          const skill = skills.find((candidate) => candidate.name === canonicalSkillName(name));
           return skill && skill.source !== "command" ? (
             <ComposerSkillToken
               key={`${key}:${end}`}

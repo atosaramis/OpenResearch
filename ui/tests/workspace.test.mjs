@@ -18,7 +18,7 @@ function load(name, dependencies) {
   }, exports, { addEventListener() {}, removeEventListener() {} });
   return exports;
 }
-const demo = { DEMO_MAIN_SESSION_ID: "demo-main", DEMO_FIGURE_SESSION_ID: "demo-figures", DEMO_LITERATURE_SESSION_ID: "demo-literature", DEMO_OVERVIEW_ARTIFACT: "overview.md" };
+const demo = { DEMO_MAIN_SESSION_ID: "demo-main", DEMO_FIGURE_SESSION_ID: "demo-figures", DEMO_LITERATURE_SESSION_ID: "demo-literature" };
 const tabs = load("workspaceTabs", { "./api": demo });
 const clean = (value) => JSON.parse(JSON.stringify(value));
 const deferred = () => {
@@ -60,7 +60,7 @@ function host(api) {
   const hook = load("useProjectWorkspace", { react, "./api": { ...api, isDemoProjectId: () => false }, "./workspaceState": workspace, "./workspaceTabs": tabs });
   const readiness = [];
   let state = tabs.initialRightPaneSessionState();
-  let props = { projectId: "p", taskKey: "one", isTask: true, demoOverview: false, location: "/projects/p/tasks/one", pane: undefined, sourceModes: {}, revision: 0 };
+  let props = { projectId: "p", taskKey: "one", isTask: true, firstDemoOpen: false, location: "/projects/p/tasks/one", pane: undefined, sourceModes: {}, revision: 0 };
   const scroll = {};
   const getScroll = () => scroll;
   const apply = (next, saved, restored) => {
@@ -111,6 +111,7 @@ test("all tab variants retain ordering, preview, history, expansion and view met
   saved.previewKey = tabs.rightTabKey(tabs.paneTab(file));
   saved.expanded = { files: ["src"], [tabs.rightTabKey(tabs.paneTab(code))]: ["src/utils"] };
   saved.scroll = { file: { top: 100, left: 8 } }; saved.sourceModes = { file: true }; saved.panelMax = true;
+  saved.treeViewport = { x: 24, y: -18, zoom: 1.4 };
   const restored = tabs.restoreWorkspace(saved, file);
   assert.deepEqual(clean(tabs.rememberWorkspace(restored, saved.scroll, saved.sourceModes)), clean(saved));
   const selected = tabs.applyPane(restored, { ...code, view: "files" });
@@ -147,7 +148,7 @@ test("delayed hydration cannot save defaults or apply a previous project respons
 
 test("pane history keeps task readiness and saved tabs; task switches restore the target snapshot", async () => {
   const writes = [];
-  const document = { ...workspace.emptyProjectWorkspace(), tasks: { one: savedTask(), two: savedTask([{ kind: "home", view: "artifacts" }]) } };
+  const document = { ...workspace.emptyProjectWorkspace(), tasks: { one: savedTask(), two: savedTask([{ kind: "home", view: "artifacts" }, { kind: "home", view: "terminal" }]) } };
   const app = host({ getProjectUiState: async () => document, saveProjectUiState: async (...args) => { writes.push(args); } });
   await app.flush();
   assert.equal(app.state.panelOpen, false);
@@ -157,7 +158,7 @@ test("pane history keeps task readiness and saved tabs; task switches restore th
   assert(app.readiness.every(Boolean));
   assert.equal(app.state.fileTabs[0].line, 23);
   app.navigate("p", "two", undefined); await app.flush();
-  assert.equal(app.state.fileTabs.length, 0); assert.equal(app.state.artifactsTabOpen, true);
+  assert.equal(app.state.fileTabs.length, 0); assert.equal(app.state.artifactsTabOpen, true); assert.equal(app.state.terminalTabOpen, true);
   app.navigate("p", "one", undefined); await app.flush();
   assert.equal(app.state.fileTabs[0].line, 23);
   assert.equal(app.state.panelOpen, false);

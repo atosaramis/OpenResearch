@@ -121,7 +121,7 @@ for (const [card, family, field, upload] of [
     const { QueryObserver } = await import("@tanstack/react-query");
     const { queryModules } = await import("./queryModules.mjs");
     let fail = false, calls = 0;
-    const { client, load } = queryModules({ [family]: async () => { calls++; if (fail) throw new Error("offline"); return [{ name: "cached" }]; } }, { nativeClient: true });
+    const { client, load } = queryModules({ [family]: async () => { calls++; if (fail) throw new Error("offline"); return family === "listUserSkills" ? { skills: [{ name: "cached" }], importing: false } : [{ name: "cached" }]; } }, { nativeClient: true });
     const options = load("settings")[`${family}Query`]();
     await client.fetchQuery(options);
     const observer = new QueryObserver(client, options);
@@ -133,7 +133,7 @@ for (const [card, family, field, upload] of [
     const prefix = statements.slice(0, statements.findIndex(ts.isReturnStatement)).map((node) => node.getText(file)).join("\n");
     const render = () => evaluate(`${prefix}\nreturn { rows: ${field}, loadError, refresh: ${card === "SkillsCard" ? "refresh" : "() => templatesQuery.refetch()"} };`, {
       useQuery: () => observer.getCurrentResult(), useMutation: () => ({}),
-      useState: (value) => [value, () => {}], useCallback: (fn) => fn, useRef: (current) => ({ current }),
+      useLayoutEffect: () => {}, useState: (value) => [value, () => {}], useCallback: (fn) => fn, useRef: (current) => ({ current }),
       [`${family}Query`]: () => options, [upload]: () => {},
     });
     assert.equal(render().rows[0].name, "cached");
@@ -161,7 +161,8 @@ test("first send waits for cold history so an accepted reply replaces its optimi
     preparingSend: { current: false }, inSourceScope: () => false,
     queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
     dispatch: (action) => load("chatStore").dispatchChat("p", action),
-    text: "new turn", pending: [], pendingAnnotations: [],
+    text: "new turn", draft: "new turn", pending: [], pendingAnnotations: [],
+    setDraft: () => {}, setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {},
   });
   assert.equal(client.getQueryData(options.queryKey), undefined);
   snapshot = { messages: [{ id: "history", role: "user", parts: [], createdAt: 1 }], queued: [], activeLeafId: "history" };
@@ -178,7 +179,7 @@ test("first send waits for cold history so an accepted reply replaces its optimi
   assert.equal(reconciled.activeLeafId, "reply");
 });
 
-test("navigation during history preparation preserves the unsent composer", async (t) => {
+test("history preparation clears the composer up front but never sends early", async (t) => {
   const { QueryObserver } = await import("@tanstack/react-query");
   const { queryModules } = await import("./queryModules.mjs");
   const { client, load } = queryModules({ getChatMessages: () => new Promise(() => {}) }, { nativeClient: true });
@@ -186,19 +187,21 @@ test("navigation during history preparation preserves the unsent composer", asyn
   const observer = new QueryObserver(client, load("chat").getChatMessagesQuery("s"));
   const off = observer.subscribe(() => {});
   const preparingSend = { current: false };
-  let cleared = false;
+  const cleared = new Set();
   const sending = evaluate(`return (async () => { let sid = "s"; ${sendPreparation()} })()`, {
     sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, preparingSend,
     queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
-    inSourceScope: () => true,
-    setDraft: () => { cleared = true; }, setAttachments: () => { cleared = true; },
-    setAnnotations: () => { cleared = true; }, setAttachError: () => {},
+    inSourceScope: () => true, draft: "unsent", pending: [], pendingAnnotations: [],
+    setDraft: () => cleared.add("draft"), setAttachments: () => cleared.add("attachments"),
+    setAnnotations: () => cleared.add("annotations"), setAttachError: () => cleared.add("attachError"),
     dispatch: () => assert.fail("must not send before history"),
   });
   const rejected = assert.rejects(sending);
   off();
   await rejected;
-  assert.equal(cleared, false);
+  // The composer clears before the first await so a scope change mid-send can
+  // never stash sent text; the caller's catch restores it via restoreComposer().
+  assert.deepEqual([...cleared].sort(), ["annotations", "attachError", "attachments", "draft"]);
   assert.equal(preparingSend.current, false);
 });
 
@@ -223,7 +226,8 @@ test("send joins a cold repair despite its intermediate cached history", async (
     sessionsOptions: { queryKey: [] }, isCurrentScope: () => true,
     preparingSend: { current: false }, inSourceScope: () => false,
     queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
-    dispatch: () => { dispatched = true; }, text: "new", pending: [], pendingAnnotations: [],
+    dispatch: () => { dispatched = true; }, text: "new", draft: "new", pending: [], pendingAnnotations: [],
+    setDraft: () => {}, setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {},
   });
   for (let i = 0; i < 20; i++) await Promise.resolve();
   assert.equal(dispatched, false);
@@ -234,21 +238,18 @@ test("send joins a cold repair despite its intermediate cached history", async (
   assert.equal(calls, 2);
 });
 
-test("send clears the unchanged raw draft but preserves edits during preparation", async () => {
-  for (const edited of [false, true]) {
-    const draft = "hello\n";
-    let current = draft;
-    const sending = evaluate(`return (async () => { let sid = "s"; ${sendPreparation()} })()`, {
-      sessionsOptions: { queryKey: [] }, isCurrentScope: () => true,
-      preparingSend: { current: false }, inSourceScope: () => true,
-      queryClient: { fetchQuery: async () => ({}), getQueryState: () => undefined },
-      getChatMessagesQuery: () => ({ queryKey: [] }),
-      draft, originalText: draft.trim(), text: draft.trim(), pending: [], pendingAnnotations: [],
-      setDraft: (update) => { current = update(current); },
-      setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {}, dispatch: () => {},
-    });
-    if (edited) current = "next message";
-    await sending;
-    assert.equal(current, edited ? "next message" : "");
-  }
+test("the pre-await draft clear keeps an edit queued since render", async () => {
+  let updater;
+  const sending = evaluate(`return (async () => { let sid = "s"; ${sendPreparation()} })()`, {
+    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true,
+    preparingSend: { current: false }, inSourceScope: () => true,
+    queryClient: { fetchQuery: async () => ({}), getQueryState: () => undefined },
+    getChatMessagesQuery: () => ({ queryKey: [] }),
+    draft: "rendered", text: "rendered", pending: [], pendingAnnotations: [],
+    setDraft: (update) => { updater = update; },
+    setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {}, dispatch: () => {},
+  });
+  await sending;
+  assert.equal(updater("rendered"), "");
+  assert.equal(updater("typed since render"), "typed since render");
 });

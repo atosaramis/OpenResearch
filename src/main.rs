@@ -25,6 +25,7 @@ mod jobs;
 #[allow(dead_code)]
 mod local;
 mod output;
+mod paths;
 mod plane;
 mod remote;
 mod store;
@@ -80,14 +81,14 @@ enum Command {
     /// List a project's runs.
     Runs(RunsArgs),
 
-    /// Read a run's terminal log (tail by default).
+    /// Show a run's compact log summary (path, size, and preview) by default.
     Logs(LogsArgs),
 
     /// Add an experiment node to a local `orx up` project.
     #[command(name = "create-experiment")]
     CreateExperiment(CreateExperimentArgs),
 
-    /// List the GPU compute catalog.
+    /// Configure compute backends, test connections, and browse offers.
     Compute(ComputeArgs),
 
     /// Spin up standalone compute in an organization (no experiment).
@@ -103,14 +104,20 @@ enum Command {
     /// Print CLI usage for agents, or fetch a skill doc.
     Skill(SkillArgs),
 
-    /// Install the OpenResearch skill into local coding agents (Claude Code, Codex, OpenCode, Cursor).
+    /// Add reusable skills to the local OpenResearch library.
+    Skills(LibraryArgs),
+
+    /// Add reusable LaTeX templates to the local OpenResearch library.
+    Templates(LibraryArgs),
+
+    /// Install the OpenResearch skill into local coding agents (Claude Code, Codex, OpenCode, Cursor, Antigravity).
     #[command(name = "install-skills")]
     InstallSkills(InstallSkillsArgs),
 
     /// Call one paper-retrieval primitive; the caller owns the search loop.
     Discover(DiscoverArgs),
 
-    /// Fetch a paper: alphaXiv report/full-text, or OpenAlex/bioRxiv metadata.
+    /// Fetch a paper: alphaXiv report/full-text, or OpenAlex/bioRxiv/PubMed metadata.
     /// The source is auto-detected from the id (override with `--source`).
     Paper(PaperArgs),
 
@@ -141,11 +148,18 @@ enum Command {
     /// Turn anonymous usage analytics on or off, or show current status.
     Telemetry(TelemetryArgs),
 
+    /// Report a bug, feature request, or frustration with OpenResearch itself
+    /// to its maintainers. Filed by the agent; see the `orx-feedback` skill.
+    Feedback(FeedbackArgs),
+
     /// Internal: the Claude plan-mode `PreToolUse` hook body. Reads the hook
     /// payload on stdin and prints an allow decision for read-only `orx`
     /// inspection; not a user command.
     #[command(name = "plan-gate", hide = true)]
     PlanGate,
+
+    #[command(name = "invocation-gate", hide = true)]
+    InvocationGate,
 
     /// Internal: the plan-mode permission bridge. A stdio MCP server Claude
     /// Code spawns (`--mcp-config`) and consults (`--permission-prompt-tool`);
@@ -153,6 +167,9 @@ enum Command {
     /// an approval card and blocks until answered. Not a user command.
     #[command(name = "mcp-gate", hide = true)]
     McpGate,
+
+    #[command(name = "antigravity-gate", hide = true)]
+    AntigravityGate,
 
     /// Internal: detached worker for optional local-project publication.
     #[command(name = "publish-branch", hide = true)]
@@ -201,7 +218,12 @@ pub struct ProjectArgs {
 #[derive(Subcommand, Debug)]
 pub enum ProjectCommand {
     /// Show a local project's details and experiment tree.
-    View { project_id: String },
+    View {
+        project_id: String,
+        /// Include archived experiments in the listing.
+        #[arg(long)]
+        all: bool,
+    },
 
     /// Edit a local project's name or run command.
     Edit {
@@ -227,15 +249,6 @@ pub struct RunsArgs {
 #[derive(Args, Debug)]
 pub struct LogsArgs {
     pub run_id: String,
-    /// Read from the start instead of the tail.
-    #[arg(long)]
-    pub head: bool,
-    /// Max bytes to read.
-    #[arg(long)]
-    pub bytes: Option<String>,
-    /// Exact byte window `<start>:<end>`.
-    #[arg(long)]
-    pub range: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -263,19 +276,13 @@ pub struct CreateExperimentArgs {
 
 #[derive(Args, Debug)]
 pub struct ComputeArgs {
-    /// List CPU-only instance offers instead of the GPU catalog. CPU instances
-    /// suit GPU-less experiments (data prep, eval harnesses, CPU-bound papers).
-    #[arg(long)]
-    pub cpu: bool,
-    /// Filter to one GPU id (e.g. `H100_SXM`). Case-insensitive. GPU mode only.
-    #[arg(long)]
-    pub gpu: Option<String>,
-    /// Filter to a specific GPU count per instance. GPU mode only.
-    #[arg(long)]
-    pub count: Option<i64>,
-    /// Filter to one provider (e.g. `runpod`, `vast`, `lambda`). Case-insensitive. GPU mode only.
-    #[arg(long)]
-    pub provider: Option<String>,
+    #[command(subcommand)]
+    pub command: Option<commands::compute::ComputeCommand>,
+    /// Machine-readable output.
+    #[arg(long, global = true)]
+    pub json: bool,
+    #[command(flatten)]
+    pub catalog: commands::compute::CatalogArgs,
 }
 
 #[derive(Args, Debug)]
@@ -397,8 +404,44 @@ pub struct ExpArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum ExpCommand {
+    /// Hide ancestors, the selected experiment, or descendants.
+    /// A later no-parent create starts a new baseline if all roots are archived.
+    #[command(group(clap::ArgGroup::new("archive_scope").required(true)))]
+    Archive {
+        exp_id: String,
+        /// Archive ancestors, excluding the selected experiment.
+        #[arg(long, group = "archive_scope")]
+        ancestors: bool,
+        /// Archive only the selected experiment.
+        #[arg(long, group = "archive_scope")]
+        only: bool,
+        /// Archive descendants, excluding the selected experiment.
+        #[arg(long, group = "archive_scope")]
+        descendants: bool,
+    },
+
+    /// Restore archived experiments using the same scopes.
+    #[command(group(clap::ArgGroup::new("unarchive_scope").required(true)))]
+    Unarchive {
+        exp_id: String,
+        /// Restore ancestors, excluding the selected experiment.
+        #[arg(long, group = "unarchive_scope")]
+        ancestors: bool,
+        /// Restore only the selected experiment.
+        #[arg(long, group = "unarchive_scope")]
+        only: bool,
+        /// Restore descendants, excluding the selected experiment.
+        #[arg(long, group = "unarchive_scope")]
+        descendants: bool,
+    },
+
     /// Show the experiment's status, run command, and latest run.
-    Status { exp_id: String },
+    Status {
+        exp_id: String,
+        /// Query live Slurm accounting in addition to locally stored status.
+        #[arg(long)]
+        scheduler: bool,
+    },
 
     /// View the experiment's description/notes, or overwrite it with `--set` / `--stdin`.
     Desc {
@@ -482,11 +525,17 @@ pub struct ExpRunArgs {
     /// you belong to exactly one org.
     #[arg(long)]
     pub org: Option<String>,
-    /// The ~/.ssh/config host alias to run on (with `--backend ssh`), or the
+    /// The ~/.ssh/config host alias (SSH defaults to its saved default host), or the
     /// cluster login node (with `--backend slurm`; defaults to the slurm
     /// settings' host).
     #[arg(long)]
     pub host: Option<String>,
+    /// Existing running Docker container on the SSH host (name or ID).
+    #[arg(long, conflicts_with = "no_container")]
+    pub container: Option<String>,
+    /// Run directly on the SSH host, overriding its saved container.
+    #[arg(long)]
+    pub no_container: bool,
     /// Repo-relative path to the k8s manifest on the experiment branch (with
     /// `--backend k8s`; default .orx/k8s.yaml). The manifest declares the run's
     /// resources — image, GPUs, topology — and orx injects the run script, env
@@ -514,9 +563,29 @@ pub struct ExpRunArgs {
     /// Internal attribution forwarded through the local orx up API.
     #[arg(skip)]
     pub chat_session_id: Option<String>,
+    #[arg(long, hide = true)]
+    pub invocation_context: Option<String>,
+    #[arg(skip)]
+    pub telemetry_suppressed: bool,
 }
 
 impl ExpRunArgs {
+    pub(crate) fn invocation_identity(
+        &self,
+    ) -> crate::error::Result<Option<crate::store::InvocationIdentity>> {
+        let context = self
+            .invocation_context
+            .clone()
+            .or_else(|| std::env::var("ORX_INVOCATION_CONTEXT").ok());
+        let identity: Option<crate::store::InvocationIdentity> = context
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?;
+        if let Some(identity) = &identity {
+            identity.validate()?;
+        }
+        Ok(identity)
+    }
+
     pub fn launching_chat_session(&self) -> Option<String> {
         self.chat_session_id
             .clone()
@@ -590,9 +659,21 @@ pub struct SkillArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct LibraryArgs {
+    #[command(subcommand)]
+    pub command: LibraryCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum LibraryCommand {
+    /// Save a file or ZIP across projects; replaces an existing entry of the same name.
+    Add { path: std::path::PathBuf },
+}
+
+#[derive(Args, Debug)]
 pub struct InstallSkillsArgs {
     /// Which agent(s) to install into: `claude`, `codex`, `opencode`, `cursor`,
-    /// or `all`. Defaults to every agent already set up on this machine.
+    /// `antigravity`, or `all`. Defaults to every agent already set up on this machine.
     #[arg(long)]
     pub agent: Option<String>,
 
@@ -620,6 +701,33 @@ pub enum TelemetryCommand {
     Off,
 }
 
+#[derive(Args, Debug)]
+pub struct FeedbackArgs {
+    #[arg(long, value_enum)]
+    pub kind: FeedbackKind,
+    /// One line, at most 200 characters.
+    #[arg(long)]
+    pub summary: String,
+    /// For bugs, include as much detail as possible: non-sensitive input,
+    /// command and flags, error, expected and actual behavior, environment,
+    /// and workaround; at most 4000 characters. Omit sensitive information.
+    #[arg(long)]
+    pub details: String,
+    /// The user's own words, rephrased to strip sensitive details; at most 1000
+    /// characters.
+    #[arg(long)]
+    pub quote: Option<String>,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[value(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackKind {
+    Bug,
+    FeatureRequest,
+    Frustration,
+}
+
 /// Which corpus a literature command searches or reads from.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[value(rename_all = "lower")]
@@ -630,6 +738,8 @@ pub enum LitSource {
     Openalex,
     /// bioRxiv biology preprints (searched via OpenAlex, fetched via bioRxiv).
     Biorxiv,
+    /// PubMed biomedical literature (NCBI E-utilities).
+    Pubmed,
 }
 
 impl LitSource {
@@ -641,6 +751,7 @@ impl LitSource {
             LitSource::Alphaxiv => "alphaxiv",
             LitSource::Openalex => "openalex",
             LitSource::Biorxiv => "biorxiv",
+            LitSource::Pubmed => "pubmed",
         }
     }
 
@@ -650,6 +761,7 @@ impl LitSource {
             LitSource::Alphaxiv => "alphaXiv",
             LitSource::Openalex => "OpenAlex",
             LitSource::Biorxiv => "bioRxiv",
+            LitSource::Pubmed => "PubMed",
         }
     }
 }
@@ -670,6 +782,8 @@ pub enum DiscoverCommand {
     Openalex(DiscoverySearchArgs),
     /// bioRxiv preprint search through OpenAlex's bioRxiv source index.
     Biorxiv(DiscoverySearchArgs),
+    /// PubMed biomedical literature search through NCBI E-utilities.
+    Pubmed(DiscoverySearchArgs),
 }
 
 #[derive(Args, Debug)]
@@ -769,24 +883,29 @@ pub enum DeleteCommand {
 #[derive(Args, Debug)]
 pub struct PaperArgs {
     /// Paper id: an arXiv id / URL (alphaXiv), a DOI (bioRxiv `10.1101/…` or any
-    /// other), or an OpenAlex `W…` id. The source is auto-detected.
+    /// other), an OpenAlex `W…` id, or a PubMed PMID / URL. The source is auto-detected.
     pub id: String,
     /// Force the source instead of auto-detecting it from the id.
     #[arg(long, value_enum)]
     pub source: Option<LitSource>,
     /// Fetch the full extracted paper text instead of the report (alphaXiv only;
-    /// OpenAlex/bioRxiv have no extracted full text and point you at the PDF).
+    /// OpenAlex/bioRxiv/PubMed have no extracted full text and point you at a full-text link).
     #[arg(long)]
     pub full: bool,
 }
 
-// The default multi-thread runtime is load-bearing for macOS app mode: it blocks
-// the main thread in the AppKit run loop while the dashboard server runs on
-// worker threads. A `current_thread` flavor would deadlock. See commands::app.
+// The default multi-thread runtime is load-bearing for desktop app mode: it
+// blocks the main thread in the window's run loop while the dashboard server runs
+// on worker threads. A `current_thread` flavor would deadlock. See commands::app.
 #[tokio::main]
 async fn main() {
+    #[cfg(windows)]
+    {
+        install_panic_reporter();
+        updates::remove_retired_exes();
+    }
     // Double-clicked as the macOS .app? Enter GUI app mode (Dock icon, dashboard
-    // server, browser) instead of parsing CLI args. Also require an empty argv so
+    // server, window) instead of parsing CLI args. Also require an empty argv so
     // the bundled binary stays usable as a CLI (`…/MacOS/OpenResearch up`), since
     // the bundle itself launches it with no arguments. See commands::app.
     #[cfg(target_os = "macos")]
@@ -794,13 +913,23 @@ async fn main() {
         // Shell hydration may change XDG_CONFIG_HOME; settle it before telemetry or the lifecycle lock.
         commands::app::hydrate_shell_env().await;
         telemetry::set_flag(false);
-        let _session = telemetry::TelemetrySession::start_app();
-        // AppKit owns process shutdown; the durable outbox covers termination before delivery.
+        commands::app::run().await;
+        return;
+    }
+    // Started by the Windows app's launcher, OpenResearch.exe, or the Linux
+    // AppImage's AppRun. See commands::app.
+    #[cfg(all(desktop_app, not(target_os = "macos")))]
+    if commands::app::launched_with_app_arg() {
+        telemetry::set_flag(false);
         commands::app::run().await;
         return;
     }
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // Double-clicked from Explorer: start the dashboard, as the macOS .app does.
+    if cli.command.is_none() && owns_its_console() {
+        cli.command = Cli::parse_from(["orx", "up"]).command;
+    }
     let Some(command) = cli.command else {
         // Bare `orx`: print the command overview to stdout and exit 0.
         use clap::CommandFactory;
@@ -816,6 +945,16 @@ async fn main() {
     // `plan-gate` is a per-tool-call hook body (fires on every Bash call during
     // plan mode): it must stay fast and touch neither stdout nor the network, so
     // skip the update check and telemetry and run it directly.
+    if matches!(command, Command::InvocationGate) {
+        if let Err(error) = commands::invocation_gate::run().await {
+            eprintln!("orx invocation-gate: {error}");
+            println!(
+                "{}",
+                serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"OpenResearch could not capture this tool invocation's model"}})
+            );
+        }
+        return;
+    }
     if matches!(command, Command::PlanGate) {
         // The hook fires on every Bash call during plan mode; it must NEVER
         // block the turn. Swallow any error to stderr and still exit 0 — a
@@ -829,6 +968,13 @@ async fn main() {
     // `mcp-gate` is Claude's stdio MCP child for the turn: stdout is the MCP
     // channel (nothing else may write to it) and startup must be instant or
     // Claude times the server out — skip the update check and telemetry.
+    if matches!(command, Command::AntigravityGate) {
+        if let Err(error) = commands::mcp_gate::run_antigravity().await {
+            eprintln!("orx antigravity-gate: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if matches!(command, Command::McpGate) {
         if let Err(err) = commands::mcp_gate::run().await {
             // stderr only; a failed bridge degrades plan mode, never the CLI.
@@ -845,9 +991,12 @@ async fn main() {
         return;
     }
     if let Command::PublishBranch(args) = &command {
-        if let Err(err) =
+        let publish = || -> error::Result<()> {
+            let lock = store::open_lifecycle_lock()?;
+            let _guard = lock.read()?;
             local::git::push_branch(&args.repo_path, &args.branch, &args.owner, &args.repo)
-        {
+        };
+        if let Err(err) = publish() {
             eprintln!("orx publish-branch: {err}");
             std::process::exit(1);
         }
@@ -856,7 +1005,7 @@ async fn main() {
 
     let warning = (!matches!(
         command,
-        Command::Version(_) | Command::Update(_) | Command::Delete(_)
+        Command::Version(_) | Command::Update(_) | Command::Delete(_) | Command::Feedback(_)
     ))
     .then(updates::UpdateWarning::start);
 
@@ -879,8 +1028,102 @@ async fn main() {
     if let Err(err) = result {
         // Match the TS: print only the message, exit 1.
         eprintln!("{}", err);
+        show_error_dialog(&err.to_string());
         std::process::exit(1);
     }
+}
+
+/// Explorer gives a double-clicked exe a console of its own, which closes when it exits.
+#[cfg(windows)]
+fn owns_its_console() -> bool {
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+
+    let mut attached = [0u32; 2];
+    // SAFETY: writes at most `attached.len()` process ids into `attached`.
+    let count = unsafe { GetConsoleProcessList(attached.as_mut_ptr(), attached.len() as u32) };
+    count == 1
+}
+
+#[cfg(not(windows))]
+fn owns_its_console() -> bool {
+    false
+}
+
+/// A double-clicked exe's console closes with it, so repeat the error in a dialog.
+#[cfg(windows)]
+fn show_error_dialog(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    // The app's console is hidden, and shared with the agents it runs, so it
+    // doesn't own it.
+    if !owns_its_console() && !commands::app::launched_with_app_arg() {
+        return;
+    }
+    let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (body, title) = (wide(message), wide("OpenResearch stopped"));
+    // SAFETY: both strings are NUL-terminated and outlive the call.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        )
+    };
+}
+
+#[cfg(target_os = "macos")]
+fn show_error_dialog(message: &str) {
+    if !commands::app::launched_as_app_bundle() || std::env::args_os().len() != 1 {
+        return;
+    }
+    let _ = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            "on run argv\ndisplay alert \"OpenResearch could not start\" message (item 1 of argv) as critical\nend run",
+            "--",
+            message,
+        ])
+        .output();
+}
+
+/// A launcher-started AppImage has no terminal to read, so show the error with
+/// whichever desktop's dialog tool is installed, as the folder picker does.
+#[cfg(all(desktop_app, target_os = "linux"))]
+fn show_error_dialog(message: &str) {
+    if !commands::app::launched_with_app_arg() {
+        return;
+    }
+    eprintln!("OpenResearch: {message}");
+    for (program, args) in [
+        (
+            "zenity",
+            &["--error", "--no-markup", "--title=OpenResearch", "--text"][..],
+        ),
+        ("kdialog", &["--title", "OpenResearch", "--error"][..]),
+    ] {
+        let mut dialog = std::process::Command::new(program);
+        dialog.args(args).arg(message);
+        local::shell_env::restore_host_gui_env(&mut dialog);
+        if dialog.status().is_ok() {
+            return;
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos", all(desktop_app, target_os = "linux"))))]
+fn show_error_dialog(_message: &str) {}
+
+/// Main thread only: a worker's panic has a running dashboard to report through.
+#[cfg(windows)]
+fn install_panic_reporter() {
+    let inner = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        inner(info);
+        if std::thread::current().name() == Some("main") {
+            show_error_dialog(&format!("{info}"));
+        }
+    }));
 }
 
 fn should_capture_command(command: &Command) -> bool {
@@ -912,6 +1155,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::SshKey(_) => "ssh-key",
         Command::Exp(_) => "exp",
         Command::Skill(_) => "skill",
+        Command::Skills(_) => "skills",
+        Command::Templates(_) => "templates",
         Command::InstallSkills(_) => "install-skills",
         Command::Discover(_) => "discover",
         Command::Paper(_) => "paper",
@@ -923,17 +1168,22 @@ fn command_name(command: &Command) -> &'static str {
         Command::Supervise(_) => "supervise",
         Command::Up(_) => "up",
         Command::Telemetry(_) => "telemetry",
+        Command::Feedback(_) => "feedback",
         Command::PlanGate => "plan-gate",
+        Command::InvocationGate => "invocation-gate",
         Command::McpGate => "mcp-gate",
+        Command::AntigravityGate => "antigravity-gate",
         Command::PublishBranch(_) => "publish-branch",
         Command::RemoteHost(_) => "remote-host",
     }
 }
 
 async fn dispatch(command: Command) -> error::Result<()> {
-    let lifecycle_lock = command_uses_lifecycle_lock(&command)
-        .then(store::open_lifecycle_lock)
-        .transpose()?;
+    let uses_lock = command_uses_lifecycle_lock(&command);
+    if uses_lock {
+        local::storage::prepare().await?;
+    }
+    let lifecycle_lock = uses_lock.then(store::open_lifecycle_lock).transpose()?;
     let _lifecycle_guard = lifecycle_lock
         .as_ref()
         .map(|lock| lock.read())
@@ -957,6 +1207,8 @@ async fn dispatch(command: Command) -> error::Result<()> {
         },
         Command::Exp(args) => commands::exp::run(args).await,
         Command::Skill(args) => commands::skill::run(args).await,
+        Command::Skills(args) => commands::library::skills(args),
+        Command::Templates(args) => commands::library::templates(args),
         Command::InstallSkills(args) => commands::install_skills::run(args).await,
         Command::Discover(args) => commands::discover::run(args).await,
         Command::Paper(args) => commands::paper::run(args).await,
@@ -971,9 +1223,12 @@ async fn dispatch(command: Command) -> error::Result<()> {
             None => commands::up::run(args).await,
         },
         Command::Telemetry(args) => commands::telemetry::run(args).await,
+        Command::Feedback(args) => commands::feedback::run(args).await,
         // Handled before dispatch (fast path, no telemetry/update check).
         Command::PlanGate => commands::plan_gate::run().await,
+        Command::InvocationGate => commands::invocation_gate::run().await,
         Command::McpGate => commands::mcp_gate::run().await,
+        Command::AntigravityGate => commands::mcp_gate::run_antigravity().await,
         Command::PublishBranch(_) => unreachable!("handled before dispatch"),
         Command::RemoteHost(_) => unreachable!("handled before dispatch"),
     }
@@ -990,8 +1245,11 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::Version(_)
             | Command::Delete(_)
             | Command::Telemetry(_)
+            | Command::Feedback(_)
             | Command::PlanGate
+            | Command::InvocationGate
             | Command::McpGate
+            | Command::AntigravityGate
             | Command::PublishBranch(_)
             | Command::RemoteHost(_)
     )
@@ -1000,6 +1258,30 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    /// A double-clicked orx.exe reaches `up` through this parse; an argv clap
+    /// rejected would panic there instead of opening the dashboard.
+    #[test]
+    fn a_double_click_parses_as_a_local_up() {
+        assert!(matches!(
+            Cli::parse_from(["orx", "up"]).command,
+            Some(Command::Up(args)) if args.remote.is_none()
+        ));
+    }
+
+    #[test]
+    fn library_add_commands_are_distinct_from_reading_skill_docs() {
+        for name in ["skills", "templates"] {
+            let cli = Cli::try_parse_from(["orx", name, "add", "./package.zip"]).unwrap();
+            let args = match cli.command.unwrap() {
+                Command::Skills(args) | Command::Templates(args) => args,
+                _ => panic!("expected a library command"),
+            };
+            let LibraryCommand::Add { path } = args.command;
+            assert_eq!(path, std::path::PathBuf::from("./package.zip"));
+            assert!(Cli::try_parse_from(["orx", name, "add"]).is_err());
+        }
+    }
 
     #[test]
     fn internal_commands_do_not_emit_command_telemetry() {
@@ -1052,10 +1334,11 @@ mod cli_tests {
     }
 
     #[test]
-    fn discover_parses_openalex_and_biorxiv_primitives() {
+    fn discover_parses_openalex_biorxiv_and_pubmed_primitives() {
         for (source, expected) in [
             ("openalex", LitSource::Openalex),
             ("biorxiv", LitSource::Biorxiv),
+            ("pubmed", LitSource::Pubmed),
         ] {
             let cli = Cli::try_parse_from(["orx", "discover", source, "protein folding"])
                 .expect("source discovery should parse");
@@ -1065,6 +1348,7 @@ mod cli_tests {
             let actual = match command {
                 DiscoverCommand::Openalex(_) => LitSource::Openalex,
                 DiscoverCommand::Biorxiv(_) => LitSource::Biorxiv,
+                DiscoverCommand::Pubmed(_) => LitSource::Pubmed,
                 _ => panic!("expected non-alphaXiv discovery source"),
             };
             assert_eq!(actual, expected);
