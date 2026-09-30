@@ -1,0 +1,20 @@
+{
+  "name": "OpenResearch CLI (orx)",
+  "install": "./.cursor/install.sh",
+  "terminals": [
+    {
+      "name": "orx backend + dashboard",
+      "command": "cargo run --locked -- up --no-browser --port 4791",
+      "description": "orx dashboard and JSON/SSE API on http://127.0.0.1:4791, serving the embedded UI over the local SQLite store."
+    },
+    {
+      "name": "ui dev server",
+      "command": "cd ui && ORX_BACKEND=http://127.0.0.1:4791 pnpm dev --port 5173 --host 127.0.0.1",
+      "description": "Vite dev server with hot reload on http://127.0.0.1:5173. Proxies /api, /_orx, and /opencode to the backend for UI development."
+    }
+  ],
+  "ports": [
+    { "name": "orx dashboard", "port": 4791 },
+    { "name": "ui dev server", "port": 5173 }
+  ]
+}
